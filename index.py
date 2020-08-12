@@ -1,11 +1,10 @@
 
 from random import seed
 from random import randint
-
 import threading
 from typing import Union, Iterable
 import sys
-from irc_client import Cli as cli
+from irc_client import Cli
 
 # log helper
 
@@ -14,7 +13,25 @@ def eprint(*args, **kwargs):
     print(*args, file=sys.stderr, **kwargs)
 
 
+class Candidate():
+    def __init__(self, bot: str, packages: Iterable[int]):
+        self.id = bot
+        self.queue = packages
+        self.done: Iterable[str] = []
+        self.failed: Interable[int] = []
+        self.source: Union[str, None] = None
+        self.now: int = 0
+
+    def is_done(self) -> bool:
+        if len(self.done) == len(self.queue):
+            return True
+        elif len(self.done) + len(self.failed) == len(self.queue):
+            return True
+        else:
+            return False
 # xdcc
+
+
 class xdcc():
     def __init__(
         self,
@@ -24,12 +41,12 @@ class xdcc():
         chan: Union[Iterable[str], None] = None,
         path: Union[str, None] = None,
         retry: int = 1,
-        verbose: bool = True,
+        verbose: bool = False,
         passive_port: int = 5001,
         wait: int = 0,
         randomize_nick: bool = True
     ):
-        self.candidate = []
+        self.candidate: Iterable[Candidate] = []
         self.cli = None
         if randomize_nick:
             seed(nick.__le__)
@@ -47,7 +64,8 @@ class xdcc():
                 int,
                 str
             ]
-    ):
+    ) -> Candidate:
+        index = 0
         if isinstance(package, str):
             package = self.__parse_package(package)
         elif isinstance(package, (tuple, list)):
@@ -65,12 +83,13 @@ class xdcc():
                     d) in enumerate(
                     self.candidate) if d.id == bot),
                 None)
-            self.candidate[bot_index].queue.extend(package)
+            index = bot_index
+            self.candidate[index].queue.extend(package)
         else:
             self.candidate.append(Candidate(bot, package))
         if self.cli is None or self.cli.is_alive() is False:
             self.cli = threading.Thread(
-                target=cli,
+                target=Cli,
                 args=(self.opts[0], self.candidate),
                 kwargs={
                     'port': self.opts[1],
@@ -84,8 +103,7 @@ class xdcc():
                 }
             )
             self.cli.start()
-            if len(self.candidate) > 0:
-                eprint(self.candidate[0].queue)
+        return self.candidate[index]
 
     def __parse_package(self, package: str):
         result = []
@@ -100,14 +118,15 @@ class xdcc():
         return sorted(result)
 
 
-class Candidate():
-    def __init__(self, bot: str, packages: Iterable[int]):
-        self.id = bot
-        self.queue = packages
-
 ##############
 # HOW TO USE #
 ##############
-# d = xdcc('irc.rizon.net', chan=['#xdccjs'], path='download')
-# d.download('ginpachi-sensei', '3')
-# d.download('ginpachi-sensei', '4')
+d = xdcc(
+    'irc.rizon.net',
+    chan=[
+        '#xdccjs',
+        'horriblesubs'],
+    path='download',
+    verbose=True)
+d.download('ginpachi-sensei', 1)
+d.download('THISGUYDOESNTEXIST', 105)
