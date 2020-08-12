@@ -1,5 +1,5 @@
 from asyncio import new_event_loop, set_event_loop, all_tasks
-from typing import Union, Iterable
+from typing import Union, List, Tuple
 from time import sleep
 import re
 from ipaddress import IPv4Address
@@ -13,6 +13,8 @@ import pydle
 from timeout import TimeOut
 from colored import fg, bg, attr
 from python_utils.time import format_time
+from job import Job
+from io import BytesIO
 
 
 def colorize(string, front=None, back=None, bold=False) -> str:
@@ -57,10 +59,10 @@ class Cli(MyBaseClient):
     def __init__(
         self,
         host: str,
-        candidate: list,
+        candidate: List[Job],
         port: int = 6667,
         nick: str = 'xdccJS',
-        chan: Union[Iterable[str], None] = None,
+        chan: Union[List[str], None] = None,
         path: Union[str, None] = None,
         retry: int = 1,
         verbose: bool = True,
@@ -78,13 +80,19 @@ class Cli(MyBaseClient):
         self.verbose = verbose
         self.candidate = candidate
         self.max_retries = retry
-        tmp_chan = []
-        for chan in self.chan:
-            if chan[0] != '#':
-                tmp_chan.append('#' + chan)
+        tmp_chan: List[str] = []
+        if self.chan:
+            for chans in self.chan:
+                if chans[0] != '#':
+                    tmp_chan.append('#' + chans)
+                else:
+                    tmp_chan.append(chans)
+            if len(tmp_chan) > 0:
+                self.chan = tmp_chan
             else:
-                tmp_chan.append(chan)
-        self.chan = tmp_chan
+                self.chan = None
+        else:
+            self.chan = None
         self.__retries = 0
         self.__pos = 0
         self.__timeout = TimeOut()
@@ -100,8 +108,6 @@ class Cli(MyBaseClient):
         eprint('connected to {}'.format(colorize(self.host, front='244')))
         if self.chan:
             for chan in self.chan:
-                if chan[0] != '#':
-                    chan = '#' + chan
                 await self.join(chan)
             eprint(
                 'joined : {}'.format(
@@ -125,6 +131,7 @@ class Cli(MyBaseClient):
     async def dl(self):
         if len(self.candidate) > 0:
             if self.__pos > len(self.candidate[0].queue) - 1:
+                self.candidate[0].trigger('done', self.candidate[0].show())
                 del self.candidate[0]
                 self.__pos = 0
                 await self.dl()
@@ -139,7 +146,7 @@ class Cli(MyBaseClient):
                         ),
                         front='yellow'), 4)
                 self.__timeout.start(
-                    15,
+                    30,
                     self.handle_retry,
                     'no response'.format(
                         colorize(
@@ -153,8 +160,6 @@ class Cli(MyBaseClient):
                     'xdcc send ' + str(self.candidate[0].queue[self.__pos])
                 )
         else:
-            for task in all_tasks():
-                task.cancel()
             await self.disconnect()
 
     async def on_raw(self, message):
@@ -201,7 +206,7 @@ class Cli(MyBaseClient):
                             )
                             self.__timeout.start(
                                 15,
-                                self.retry,
+                                self.handle_retry,
                                 "bot doesn't support transfert resuming",
                                 None,
                                 padding=6
@@ -216,7 +221,7 @@ class Cli(MyBaseClient):
                         else:
                             self.__timeout.start(
                                 5,
-                                self.retry,
+                                self.handle_retry,
                                 'cannot connect',
                                 None,
                                 padding=6
@@ -233,7 +238,12 @@ class Cli(MyBaseClient):
                             await self.dl()
                     else:
                         self.__timeout.start(
-                            5, self.retry, 'cannot connect', None, padding=6)
+                            5,
+                            self.handle_retry,
+                            'cannot connect',
+                            None,
+                            padding=6
+                        )
                         await self.handle_dl(res)
                         self.resume = None
                         await self.dl()
@@ -255,7 +265,12 @@ class Cli(MyBaseClient):
                         if self.resume['token']:
                             res['token'] = self.resume['token']
                         self.__timeout.start(
-                            5, self.retry, 'cannot connect', None, padding=6)
+                            5,
+                            self.handle_retry,
+                            'cannot connect',
+                            None,
+                            padding=6
+                        )
                         await self.handle_dl(res)
                         self.resume = None
                         await self.dl()
@@ -267,7 +282,7 @@ class Cli(MyBaseClient):
             stream.seek(res['position'])
             stream.truncate()
         else:
-            stream = sys.stdout.buffer
+            stream = BytesIO()
         allsockets.append(stream)
         if res['port'] == 0:
             # eprint('passive dcc')
@@ -299,7 +314,7 @@ class Cli(MyBaseClient):
             connection.settimeout(5)
             allsockets.append(connection)
         received = 0
-        total = res['length'] - res['position']
+        total: int = res['length'] - res['position']
         widgets = [
             '      \u2937 ',
             progressbar.Bar(
@@ -322,32 +337,40 @@ class Cli(MyBaseClient):
         while received < total:
             self.__timeout.start(
                 5,
-                self.retry,
+                self.handle_retry,
                 'timeout: stopped receiving data',
                 allsockets,
                 padding=6)
             data = connection.recv(2**14)
+            if not self.path:
+                self.candidate[0].trigger(
+                    'pipe', data, False, received, total, res)
+            stream.write(data)
             received += len(data)
             bar.update(received)
-            stream.write(data)
             payload = struct.pack(self.struct_format, received)
             connection.send(payload)
             if received >= total:
                 for sock in allsockets:
                     sock.close()
                 bar.finish()
+                if not self.path:
+                    self.candidate[0].trigger(
+                        'pipe', None, True, received, total, res)
                 self.__pos += 1
                 self.candidate[0].done.append(res['file'])
                 self.__timeout.stop()
                 self.__retries = 0
+                self.candidate[0].trigger('downloaded', res)
                 eprint('done.', padding=9)
 
     async def on_unknown(self, message):
         await super().on_unknown(message)
         pass
 
-    async def handle_retry(self, messsage, streams, padding=0):
-        eprint(messsage, padding=padding, infotype='err')
+    async def handle_retry(self, message, streams, padding=0):
+        self.candidate[0].trigger('error', message, self.candidate[0].show())
+        eprint(message, padding=padding, infotype='err')
         if streams:
             for stream in streams:
                 stream.close()
