@@ -1,6 +1,6 @@
 from asyncio import new_event_loop, set_event_loop, all_tasks
 from typing import Union, Iterable
-import time
+from time import sleep
 import re
 from ipaddress import IPv4Address
 import os
@@ -11,10 +11,38 @@ from urllib.request import urlopen
 import progressbar
 import pydle
 from timeout import TimeOut
+from colored import fg, bg, attr
+from python_utils.time import format_time
 
 
-def eprint(*args, **kwargs):
-    print(*args, file=sys.stderr, **kwargs)
+def colorize(string, front=None, back=None, bold=False) -> str:
+    string = str(string)
+    if front:
+        string = fg(str(front)) + string
+    if back:
+        string = fg(str(back)) + string
+    if bold:
+        string = attr('bold') + string
+    string += attr('reset')
+    return string
+
+
+def eprint(message, padding=0, infotype='ok'):
+    bold = attr('bold')
+    green = bold + fg('green')
+    cyan = bold + fg('cyan')
+    red = bold + fg('red')
+    reset = attr('reset')
+    if infotype == 'ok':
+        infotype = green + '\u2713 ' + reset
+    elif infotype == 'info':
+        infotype = cyan + '\u2139 ' + reset
+    elif infotype == 'err':
+        infotype = red + '\u0058 ' + reset
+    message = infotype + message
+    if padding > 0:
+        message = '\u2937 '.rjust(padding, ' ') + message
+    print(message, file=sys.stderr)
 
 
 MyBaseClient = pydle.featurize(
@@ -40,6 +68,7 @@ class Cli(MyBaseClient):
         wait: int = 0
     ):
         self.struct_format = b"!I"
+        self.host = '{}:{}'.format(host, port)
         self.path = path
         self.chan = chan
         self.wait = wait
@@ -49,6 +78,13 @@ class Cli(MyBaseClient):
         self.verbose = verbose
         self.candidate = candidate
         self.max_retries = retry
+        tmp_chan = []
+        for chan in self.chan:
+            if chan[0] != '#':
+                tmp_chan.append('#' + chan)
+            else:
+                tmp_chan.append(chan)
+        self.chan = tmp_chan
         self.__retries = 0
         self.__pos = 0
         self.__timeout = TimeOut()
@@ -61,18 +97,29 @@ class Cli(MyBaseClient):
 
     async def on_connect(self):
         await super().on_connect()
+        eprint('connected to {}'.format(colorize(self.host, front='244')))
         if self.chan:
             for chan in self.chan:
-                if chan[0] == '#':
-                    await self.join(chan)
-                    eprint('joined: ' + chan)
-                else:
-                    await self.join('#' + chan)
-                    eprint('joined: #' + chan)
+                if chan[0] != '#':
+                    chan = '#' + chan
+                await self.join(chan)
+            eprint(
+                'joined : {}'.format(
+                    colorize(
+                        ', '.join(
+                            self.chan),
+                        front='244')), padding=3)
         if self.wait:
-            eprint('sleeping for ' + str(self.wait))
-            time.sleep(self.wait)
-            eprint('done sleeping')
+            widgets = [
+                progressbar.Timer(
+                    format='  \u2937 {} waiting: %(elapsed)s / {}'.format(
+                        colorize(
+                            '\u2139', front='cyan', bold=True), format_time(
+                            self.wait)))]
+            for i in progressbar.progressbar(
+                    range(100), redirect_stderr=True, widgets=widgets):
+                sleep(self.wait / 100)
+            # eprint('done sleeping')
         await self.dl()
 
     async def dl(self):
@@ -82,9 +129,25 @@ class Cli(MyBaseClient):
                 self.__pos = 0
                 await self.dl()
             else:
-                eprint('xdcc send ' + str(self.candidate[0].queue[self.__pos]))
-
-                # self.__timeout.start(15, print, 'no initial response')
+                if self.__retries == 0:
+                    eprint('sending command: {} {} {} {}'.format(
+                        colorize('/MSG', front='244'),
+                        colorize(self.candidate[0].id, front='13'),
+                        colorize('xdcc send', front='244'),
+                        colorize(
+                            self.candidate[0].queue[self.__pos], front='yellow'
+                        ),
+                        front='yellow'), 4)
+                self.__timeout.start(
+                    15,
+                    self.handle_retry,
+                    'no response'.format(
+                        colorize(
+                            self.candidate[0].id,
+                            front='yellow')),
+                    None,
+                    padding=6)
+                self.candidate[0].now = self.candidate[0].queue[self.__pos]
                 await self.message(
                     self.candidate[0].id,
                     'xdcc send ' + str(self.candidate[0].queue[self.__pos])
@@ -99,17 +162,16 @@ class Cli(MyBaseClient):
         if len(message.params) > 1:
             match = re.search("{}DCC .*{}".format(chr(1),
                                                   chr(1)), message.params[1])
-            source = message.source
-            # self.__timeout.stop()
+            self.candidate[0].source = message.source
             if match:
                 regexp = r'(?:[^\s"]+|"[^"]*")+'
                 match = match.group(0)
                 match = re.findall(regexp, match.replace(chr(1), ''))
                 if match[1] == 'SEND':
-                    eprint('dcc reponse initial')
+                    self.__timeout.stop()
                     res = {
                         'type': match[1],
-                        'from': re.sub('!.+$', '', source),
+                        'from': re.sub('!.+$', '', self.candidate[0].source),
                         'file': match[2].replace('"', ''),
                         'ip': str(IPv4Address(int(match[3]))),
                         'port': int(match[4]),
@@ -124,17 +186,26 @@ class Cli(MyBaseClient):
                             self.path + '/' + res['file'])
                         if os.path.exists(res['file_path']):
                             position = os.path.getsize(res['file_path'])
-                            eprint(str(res['length']) + ' vs ' + str(position))
                             if res['length'] == position:
-                                eprint('same file')
                                 position = position - 8192
                             if re.search(' ', res['file']):
                                 quoted_filename = '"' + res['file'] + '"'
                             else:
                                 quoted_filename = res['file']
-                            eprint('demande de resume')
-                            eprint('DCC RESUME', quoted_filename + ' ' +
-                                   str(res['port']) + ' ' + str(position))
+                            eprint(
+                                'resuming: {}'.format(
+                                    colorize(res['file'], front='cyan')
+                                ),
+                                6,
+                                infotype='info'
+                            )
+                            self.__timeout.start(
+                                15,
+                                self.retry,
+                                "bot doesn't support transfert resuming",
+                                None,
+                                padding=6
+                            )
                             await self.ctcp(
                                 res['from'],
                                 'DCC RESUME',
@@ -143,21 +214,36 @@ class Cli(MyBaseClient):
                             )
                             self.resume = res
                         else:
+                            self.__timeout.start(
+                                5,
+                                self.retry,
+                                'cannot connect',
+                                None,
+                                padding=6
+                            )
+                            eprint(
+                                'downloading : {}'.format(
+                                    colorize(res['file'], front='cyan')
+                                ),
+                                6,
+                                infotype='info'
+                            )
                             await self.handle_dl(res)
                             self.resume = None
-                            self.__pos = self.__pos + 1
                             await self.dl()
                     else:
+                        self.__timeout.start(
+                            5, self.retry, 'cannot connect', None, padding=6)
                         await self.handle_dl(res)
                         self.resume = None
-                        self.__pos = self.__pos + 1
                         await self.dl()
                 elif match[1] == 'ACCEPT':
-                    print('resume accepte')
                     if self.resume:
                         res = {
                             'type': match[1],
-                            'from': re.sub('!.+$', '', source),
+                            'from': re.sub(
+                                '!.+$', '', self.candidate[0].source
+                            ),
                             'file': match[2].replace('"', ''),
                             'file_path': str(self.resume['file_path']),
                             'ip': str(self.resume['ip']),
@@ -168,24 +254,27 @@ class Cli(MyBaseClient):
                         }
                         if self.resume['token']:
                             res['token'] = self.resume['token']
+                        self.__timeout.start(
+                            5, self.retry, 'cannot connect', None, padding=6)
                         await self.handle_dl(res)
                         self.resume = None
-                        self.__pos = self.__pos + 1
                         await self.dl()
 
     async def handle_dl(self, res):
-        eprint('start dl')
+        allsockets = []
         if self.path:
             stream = open(res['file_path'], 'ab')
             stream.seek(res['position'])
             stream.truncate()
         else:
             stream = sys.stdout.buffer
+        allsockets.append(stream)
         if res['port'] == 0:
-            eprint('passive dcc')
+            # eprint('passive dcc')
             server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             server.bind(('', self.passive_port))
             server.listen(1)
+            allsockets.append(server)
             if re.search(' ', res['file']):
                 quoted_filename = '"' + res['file'] + '"'
             else:
@@ -198,23 +287,31 @@ class Cli(MyBaseClient):
                 res['token']
             )
             await self.ctcp(res['from'], message)
-            eprint(res['from'], message)
+            # eprint(res['from'], message)
             while True:
                 connection, address = server.accept()
-                eprint("Connected from", address)
+                allsockets.append(connection)
                 break
         else:
-            eprint('active dcc')
+            # eprint('active dcc')
             connection = socket.socket()
             connection.connect((res['ip'], res['port']))
             connection.settimeout(5)
+            allsockets.append(connection)
         received = 0
         total = res['length'] - res['position']
         widgets = [
-            'Downloading: ', progressbar.Percentage(),
-            ' @ ', progressbar.FileTransferSpeed(),
-            ' ', progressbar.Bar(marker='#', left='[', right=']'),
-            ' ', progressbar.ETA(),
+            '      \u2937 ',
+            progressbar.Bar(
+                marker='=',
+                left='[',
+                right=']'),
+            ' ',
+            progressbar.ETA(),
+            ' @ ',
+            progressbar.FileTransferSpeed(),
+            ' - ',
+            progressbar.Percentage(),
         ]
         bar = progressbar.ProgressBar(
             widgets=widgets,
@@ -223,6 +320,12 @@ class Cli(MyBaseClient):
             term_width=80
         ).start()
         while received < total:
+            self.__timeout.start(
+                5,
+                self.retry,
+                'timeout: stopped receiving data',
+                allsockets,
+                padding=6)
             data = connection.recv(2**14)
             received += len(data)
             bar.update(received)
@@ -230,10 +333,44 @@ class Cli(MyBaseClient):
             payload = struct.pack(self.struct_format, received)
             connection.send(payload)
             if received >= total:
-                connection.close()
-                stream.close()
+                for sock in allsockets:
+                    sock.close()
                 bar.finish()
-        eprint('im done')
+                self.__pos += 1
+                self.candidate[0].done.append(res['file'])
+                self.__timeout.stop()
+                self.__retries = 0
+                eprint('done.', padding=9)
 
     async def on_unknown(self, message):
+        await super().on_unknown(message)
         pass
+
+    async def handle_retry(self, messsage, streams, padding=0):
+        eprint(messsage, padding=padding, infotype='err')
+        if streams:
+            for stream in streams:
+                stream.close()
+        if self.__retries < self.max_retries:
+            self.__retries += 1
+            eprint(
+                'retrying : {}/{}'.format(
+                    self.__retries,
+                    self.max_retries
+                ),
+                padding=6,
+                infotype='info'
+            )
+            await self.dl()
+        else:
+            eprint(
+                'max attempts: skipping pack {}'.format(
+                    colorize(self.candidate[0].now, front='yellow'),
+                ),
+                padding=8,
+                infotype='err'
+            )
+            self.candidate[0].failed.append(self.candidate[0].now)
+            self.__pos += 1
+            self.__retries = 0
+            await self.dl()
