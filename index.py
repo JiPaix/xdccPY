@@ -1,35 +1,10 @@
-
 from random import seed
 from random import randint
 import threading
-from typing import Union, Iterable
+from typing import Any, Dict, Union, Iterable, List
 import sys
 from irc_client import Cli
-
-# log helper
-
-
-def eprint(*args, **kwargs):
-    print(*args, file=sys.stderr, **kwargs)
-
-
-class Candidate():
-    def __init__(self, bot: str, packages: Iterable[int]):
-        self.id = bot
-        self.queue = packages
-        self.done: Iterable[str] = []
-        self.failed: Interable[int] = []
-        self.source: Union[str, None] = None
-        self.now: int = 0
-
-    def is_done(self) -> bool:
-        if len(self.done) == len(self.queue):
-            return True
-        elif len(self.done) + len(self.failed) == len(self.queue):
-            return True
-        else:
-            return False
-# xdcc
+from job import Job
 
 
 class xdcc():
@@ -46,7 +21,7 @@ class xdcc():
         wait: int = 0,
         randomize_nick: bool = True
     ):
-        self.candidate: Iterable[Candidate] = []
+        self.candidate: List[Job] = []
         self.cli = None
         if randomize_nick:
             seed(nick.__le__)
@@ -64,17 +39,19 @@ class xdcc():
                 int,
                 str
             ]
-    ) -> Candidate:
+    ) -> Job:
         index = 0
+        retpackage: List[int] = []
         if isinstance(package, str):
-            package = self.__parse_package(package)
+            retpackage = self.__parse_package(package)
         elif isinstance(package, (tuple, list)):
-            newpackage = []
+            newpackage: List[int] = []
             for pack in package:
                 newpackage.append(int(pack))
-            package = newpackage
+            retpackage = newpackage
         elif isinstance(package, int):
-            package = [package]
+            retpackage = [package]
+
         dejavu = list(filter(lambda dl: dl.id == bot, self.candidate))
         if len(dejavu) > 0:
             bot_index = next(
@@ -83,10 +60,10 @@ class xdcc():
                     d) in enumerate(
                     self.candidate) if d.id == bot),
                 None)
-            index = bot_index
-            self.candidate[index].queue.extend(package)
+            index = bot_index or 0
+            self.candidate[index].queue.extend(retpackage)
         else:
-            self.candidate.append(Candidate(bot, package))
+            self.candidate.append(Job(bot, retpackage))
         if self.cli is None or self.cli.is_alive() is False:
             self.cli = threading.Thread(
                 target=Cli,
@@ -105,8 +82,8 @@ class xdcc():
             self.cli.start()
         return self.candidate[index]
 
-    def __parse_package(self, package: str):
-        result = []
+    def __parse_package(self, package: str) -> List[int]:
+        result: List[int] = []
         split = package.replace(' ', '').split(',')
         for pack in split:
             if '-' in pack:
@@ -116,17 +93,3 @@ class xdcc():
             else:
                 result.append(int(pack))
         return sorted(result)
-
-
-##############
-# HOW TO USE #
-##############
-d = xdcc(
-    'irc.rizon.net',
-    chan=[
-        '#xdccjs',
-        'horriblesubs'],
-    path='download',
-    verbose=True)
-d.download('ginpachi-sensei', 1)
-d.download('THISGUYDOESNTEXIST', 105)

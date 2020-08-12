@@ -1,13 +1,18 @@
 import threading
 import asyncio
-from contextlib import suppress
 
 
 class TimeOut():
     def __init__(self):
         self.timer = None
 
-    def start(self, delay, function, message, streams, padding=0):
+    def start(
+            self,
+            delay,
+            function,
+            message,
+            streams,
+            padding=0):
         if self.timer:
             self.timer.cancel()
         self.timer = threading.Timer(
@@ -26,6 +31,11 @@ class TimeOut():
             if self.timer.is_alive():
                 self.timer.cancel()
 
+    def join(self):
+        if self.timer:
+            if self.timer.is_alive():
+                self.timer.join()
+
 
 def thr(**kwargs):
     fn = kwargs["fn"]
@@ -34,6 +44,5 @@ def thr(**kwargs):
     padding = kwargs["padding"]
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    with suppress(asyncio.exceptions.CancelledError):
-        loop.run_until_complete(fn(msg, stream, padding))
+    loop.run_until_complete(fn(msg, stream, padding))
     loop.close()
