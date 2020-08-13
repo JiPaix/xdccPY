@@ -23,6 +23,6 @@ def write2stream(data, done, received, total, res):
             VLC.kill()
 
 
-# It's important to not start xdccPY with a path
+# Path must be None in order to enable piping
 xdccPY = xdcc('irc.server.net', path=None)
 xdccPY.download('a-bot', 124).on('pipe', write2stream)
